@@ -16,10 +16,9 @@ load_dotenv()
 app = Flask(__name__)
 CORS(app)
 
-# -------------------------------------------------------
+
 # GOOGLE DRIVE FILE IDs — loaded from environment variables
-# Set these in .env (local) or Render dashboard (production)
-# -------------------------------------------------------
+
 DRIVE_FILES = {
     "gradient_boosting_model.pkl": os.getenv("GDRIVE_MODEL_ID"),
     "scaler.pkl"                 : os.getenv("GDRIVE_SCALER_ID"),
@@ -39,9 +38,9 @@ scaler       = None
 FEATURE_COLS = None
 explainer    = None
 
-# -------------------------------------------------------
+
 # AUTO DOWNLOAD FROM GOOGLE DRIVE
-# -------------------------------------------------------
+
 def download_from_drive(file_id, dest_path):
     print(f"  Downloading {os.path.basename(dest_path)}...")
 
@@ -72,7 +71,7 @@ def download_from_drive(file_id, dest_path):
                 f.write(chunk)
 
     size_kb = os.path.getsize(dest_path) / 1024
-    print(f"  ✅ {os.path.basename(dest_path)} downloaded! ({size_kb:.1f} KB)")
+    print(f"{os.path.basename(dest_path)} downloaded! ({size_kb:.1f} KB)")
 
 
 def ensure_files():
@@ -87,18 +86,18 @@ def ensure_files():
         )
 
         if os.path.exists(dest):
-            print(f"  ✅ {filename} already exists")
+            print(f"{filename} already exists")
         else:
             if not file_id:
-                print(f"  ❌ ERROR: No Drive ID set for {filename}")
+                print(f"ERROR: No Drive ID set for {filename}")
                 print(f"     Set environment variable for this file")
                 all_ok = False
                 continue
             try:
-                print(f"  ⬇️  {filename} missing — downloading...")
+                print(f"{filename} missing — downloading...")
                 download_from_drive(file_id, dest)
             except Exception as e:
-                print(f"  ❌ Failed to download {filename}: {e}")
+                print(f"Failed to download {filename}: {e}")
                 all_ok = False
 
     return all_ok
@@ -112,36 +111,35 @@ def initialize():
     print("  CSE VOLATILITY PREDICTOR — STARTUP")
     print("="*50)
 
-    # Step 1: Check/download files from Google Drive
-    print("\n🔄 Step 1: Checking model files...")
+    #  Check/download files from Google Drive
+    print("\n Step 1: Checking model files...")
     ok = ensure_files()
     if not ok:
-        print("⚠️  Some files missing — check environment variables!")
+        print("Some files missing — check environment variables!")
 
-    # Step 2: Load model into memory
-    print("\n📦 Step 2: Loading model into memory...")
+    #  Load model into memory
+    print("\n Step 2: Loading model into memory...")
     try:
         model        = joblib.load(os.path.join(MODEL_DIR, "gradient_boosting_model.pkl"))
         scaler       = joblib.load(os.path.join(MODEL_DIR, "scaler.pkl"))
         FEATURE_COLS = joblib.load(os.path.join(MODEL_DIR, "feature_cols.pkl"))
         explainer    = shap.TreeExplainer(model)
 
-        print(f"  ✅ GradientBoostingClassifier loaded")
-        print(f"  ✅ StandardScaler loaded")
-        print(f"  ✅ Feature columns loaded: {len(FEATURE_COLS)} features")
-        print(f"  ✅ SHAP TreeExplainer ready")
-        print(f"\n✅ Server ready! All systems operational.")
+        print(f"   GradientBoostingClassifier loaded")
+        print(f"   StandardScaler loaded")
+        print(f"   Feature columns loaded: {len(FEATURE_COLS)} features")
+        print(f"   SHAP TreeExplainer ready")
+        print(f"\n Server ready! All systems operational.")
         print("="*50 + "\n")
 
     except Exception as e:
-        print(f"  ❌ Failed to load model: {e}")
+        print(f"  Failed to load model: {e}")
         raise e
 
 
-# -------------------------------------------------------
+
 # TECHNICAL INDICATOR FUNCTIONS
-# (Must match exactly what was used in training)
-# -------------------------------------------------------
+
 def compute_rsi(series, period=14):
     delta    = series.diff()
     gain     = delta.clip(lower=0)
@@ -260,9 +258,9 @@ def build_features(hist_df):
     return df[FEATURE_COLS].iloc[-1]
 
 
-# -------------------------------------------------------
+
 # API ENDPOINTS
-# -------------------------------------------------------
+
 
 @app.route('/health', methods=['GET'])
 def health():
@@ -342,10 +340,10 @@ def predict_ticker(ticker):
     6. Returns full result including price history
     """
     try:
-        print(f"\n🔮 Prediction request: {ticker}")
+        print(f"\n Prediction request: {ticker}")
 
-        # ── Step 1: Fetch live stock data ──────────────────
-        print(f"  📡 Fetching live data from Yahoo Finance...")
+        # Fetch live stock data 
+        print(f"  Fetching live data from Yahoo Finance...")
         df = yf.download(
             ticker,
             period      = '120d',
@@ -373,10 +371,10 @@ def predict_ticker(ticker):
         df.sort_values('Date', inplace=True)
         df.reset_index(drop=True, inplace=True)
 
-        print(f"  ✅ Got {len(df)} rows | Latest: {df['Date'].iloc[-1].date()} | Close: {df['Close'].iloc[-1]:.2f} LKR")
+        print(f"  Got {len(df)} rows | Latest: {df['Date'].iloc[-1].date()} | Close: {df['Close'].iloc[-1]:.2f} LKR")
 
-        # ── Step 2: Build features ─────────────────────────
-        print(f"  🔧 Computing 56 technical indicators...")
+        # Build features 
+        print(f" Computing 56 technical indicators...")
         features_row = build_features(df)
 
         if features_row.isnull().any():
@@ -385,18 +383,18 @@ def predict_ticker(ticker):
                 'error': f'NaN found in features: {null_feats[:5]}. Try a different ticker.'
             }), 400
 
-        # ── Step 3: Scale features ─────────────────────────
+        # Scale features 
         X = scaler.transform([features_row.values])
 
-        # ── Step 4: Predict ────────────────────────────────
+        # Predict
         pred          = int(model.predict(X)[0])
         probabilities = model.predict_proba(X)[0]
         confidence    = float(probabilities[pred]) * 100
 
-        print(f"  🎯 Prediction: {'HIGH' if pred==1 else 'LOW'} volatility ({confidence:.1f}% confidence)")
+        print(f" Prediction: {'HIGH' if pred==1 else 'LOW'} volatility ({confidence:.1f}% confidence)")
 
-        # ── Step 5: SHAP Explainability ────────────────────
-        print(f"  🔍 Computing SHAP values...")
+        #  SHAP Explainability 
+        print(f" Computing SHAP values...")
         sv      = explainer.shap_values(X)
         sv_flat = sv[0] if len(np.array(sv).shape) > 1 else sv
 
@@ -409,7 +407,7 @@ def predict_ticker(ticker):
             for i, feat in enumerate(FEATURE_COLS)
         ], key=lambda x: abs(x['shap_value']), reverse=True)
 
-        # ── Step 6: Build price history for chart ──────────
+        # Build price history for chart
         recent = df.tail(30)
         price_history = [
             {
@@ -460,14 +458,14 @@ def predict_ticker(ticker):
 
     except Exception as e:
         import traceback
-        print(f"  ❌ Error: {e}")
+        print(f" Error: {e}")
         print(traceback.format_exc())
         return jsonify({'error': str(e)}), 500
 
 
-# -------------------------------------------------------
+
 # STARTUP — Initialize model when server starts
-# -------------------------------------------------------
+
 initialize()
 
 if __name__ == '__main__':
