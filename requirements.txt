@@ -1,0 +1,11 @@
+flask
+flask-cors
+scikit-learn==1.5.0
+shap
+pandas
+numpy
+joblib
+yfinance
+requests
+gunicorn
+python-dotenv

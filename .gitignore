@@ -1,0 +1,7 @@
+.env
+models/
+results/
+__pycache__/
+*.pkl
+*.pyc
+venv/
