@@ -462,7 +462,97 @@ def predict_ticker(ticker):
         print(traceback.format_exc())
         return jsonify({'error': str(e)}), 500
 
+@app.route('/predict_manual', methods=['POST'])
+def predict_manual():
+    """
+    Manual prediction endpoint.
+    Accepts 8 key technical indicator values from user,
+    fills remaining 48 features with dataset medians,
+    then predicts using the trained model.
+    """
+    try:
+        body        = request.get_json()
+        user_inputs = body.get('features', {})
 
+        print(f"\n✏️  Manual prediction request: {user_inputs}")
+
+        # Median values for all 56 features
+        # These are approximate medians from the CSE training dataset
+        FEATURE_MEDIANS = {
+            'MA_5': 66.0, 'MA_10': 66.0, 'MA_20': 66.0, 'MA_50': 66.0,
+            'EMA_5': 66.0, 'EMA_10': 66.0, 'EMA_20': 66.0, 'EMA_50': 66.0,
+            'Daily_Return': 0.0, 'HL_Pct': 0.02, 'OC_Pct': 0.0,
+            'Price_MA5_Ratio': 1.0, 'Price_MA20_Ratio': 1.0, 'Price_MA50_Ratio': 1.0,
+            'MA5_MA20_Cross': 0.0, 'MA10_MA50_Cross': 0.0,
+            'RSI_7': 50.0, 'RSI_14': 50.0, 'RSI_21': 50.0,
+            'ROC_3': 0.0, 'ROC_5': 0.0, 'ROC_10': 0.0, 'ROC_20': 0.0,
+            'Momentum_3': 0.0, 'Momentum_5': 0.0, 'Momentum_10': 0.0, 'Momentum_20': 0.0,
+            'MACD': 0.0, 'MACD_Signal': 0.0, 'MACD_Hist': 0.0,
+            'BB_Upper': 70.0, 'BB_Lower': 62.0, 'BB_Bandwidth': 0.08, 'BB_Position': 0.5,
+            'Volatility_5': 0.012, 'Volatility_10': 0.015, 'Volatility_20': 0.016,
+            'ATR_14': 1.3, 'ATR_Ratio': 0.02,
+            'Volume_MA5': 280000.0, 'Volume_MA10': 280000.0,
+            'Volume_Ratio': 1.0, 'OBV': 0.0,
+            'Return_Lag_1': 0.0, 'Return_Lag_2': 0.0,
+            'Return_Lag_3': 0.0, 'Return_Lag_5': 0.0,
+            'Close_Lag_1': 66.0, 'Close_Lag_2': 66.0,
+            'Close_Lag_3': 66.0, 'Close_Lag_5': 66.0,
+            'Open': 66.0, 'High': 67.5, 'Low': 64.5,
+            'Close': 66.0, 'Volume': 280000.0,
+        }
+
+        # Build feature vector: start from medians, override with user inputs
+        feature_row = []
+        for feat in FEATURE_COLS:
+            if feat in user_inputs:
+                feature_row.append(float(user_inputs[feat]))
+            else:
+                feature_row.append(FEATURE_MEDIANS.get(feat, 0.0))
+
+        # Scale and predict
+        X             = scaler.transform([feature_row])
+        pred          = int(model.predict(X)[0])
+        probabilities = model.predict_proba(X)[0]
+        confidence    = float(probabilities[pred]) * 100
+
+        # SHAP
+        sv      = explainer.shap_values(X)
+        sv_flat = sv[0] if len(np.array(sv).shape) > 1 else sv
+
+        shap_list = sorted([
+            {
+                'feature'   : feat,
+                'shap_value': round(float(sv_flat[i]), 5),
+                'importance': round(float(model.feature_importances_[i]), 5)
+            }
+            for i, feat in enumerate(FEATURE_COLS)
+        ], key=lambda x: abs(x['shap_value']), reverse=True)
+
+        print(f"  🎯 Manual result: {'HIGH' if pred==1 else 'LOW'} ({confidence:.1f}%)")
+
+        return jsonify({
+            'prediction'    : pred,
+            'volatility'    : 'HIGH' if pred == 1 else 'LOW',
+            'confidence'    : round(confidence, 2),
+            'probabilities' : {
+                'LOW' : round(float(probabilities[0]) * 100, 2),
+                'HIGH': round(float(probabilities[1]) * 100, 2)
+            },
+            'top_features'  : shap_list[:10],
+            'interpretation': (
+                'High market volatility expected based on your input values. '
+                'The indicators you set suggest significant price fluctuations ahead.'
+                if pred == 1 else
+                'Low market volatility expected based on your input values. '
+                'The indicators you set suggest relatively stable prices ahead.'
+            ),
+            'inputs_used'   : user_inputs
+        })
+
+    except Exception as e:
+        import traceback
+        print(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
 
 # STARTUP — Initialize model when server starts
 
