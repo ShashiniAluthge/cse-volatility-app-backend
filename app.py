@@ -17,14 +17,17 @@ app = Flask(__name__)
 CORS(app)
 
 
-# GOOGLE DRIVE FILE IDs — loaded from environment variables
+# ── GOOGLE DRIVE FILE IDs ─────────────────────────────────────────────────────
 
 DRIVE_FILES = {
-    "gradient_boosting_model.pkl": os.getenv("GDRIVE_MODEL_ID"),
-    "scaler.pkl"                 : os.getenv("GDRIVE_SCALER_ID"),
-    "feature_cols.pkl"           : os.getenv("GDRIVE_FEATURES_ID"),
-    "model_metrics.csv"          : os.getenv("GDRIVE_METRICS_ID"),
-    "feature_importances.csv"    : os.getenv("GDRIVE_IMPORTANCES_ID"),
+    "gradient_boosting_model.pkl" : os.getenv("GDRIVE_MODEL_ID"),
+    "scaler.pkl"                  : os.getenv("GDRIVE_SCALER_ID"),
+    "feature_cols.pkl"            : os.getenv("GDRIVE_FEATURES_ID"),
+    "model_metrics.csv"           : os.getenv("GDRIVE_METRICS_ID"),
+    "feature_importances.csv"     : os.getenv("GDRIVE_IMPORTANCES_ID"),
+    "random_forest_model.pkl"     : os.getenv("GDRIVE_RF_MODEL_ID"),
+    "rf_metrics.csv"              : os.getenv("GDRIVE_RF_METRICS_ID"),
+    "rf_feature_importances.csv"  : os.getenv("GDRIVE_RF_IMPORTANCES_ID"),
 }
 
 MODEL_DIR   = "models"
@@ -32,25 +35,25 @@ RESULTS_DIR = "results"
 os.makedirs(MODEL_DIR,   exist_ok=True)
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
-# Global model variables
-model        = None
+# ── Global model variables ────────────────────────────────────────────────────
+
+model        = None   # GradientBoostingClassifier
 scaler       = None
 FEATURE_COLS = None
-explainer    = None
+explainer    = None   # SHAP for GB
+
+rf_model     = None   # RandomForestClassifier
+rf_explainer = None   # SHAP for RF
 
 
-# AUTO DOWNLOAD FROM GOOGLE DRIVE
+# ── GOOGLE DRIVE DOWNLOAD ─────────────────────────────────────────────────────
 
 def download_from_drive(file_id, dest_path):
     print(f"  Downloading {os.path.basename(dest_path)}...")
-
-    url     = f"https://drive.google.com/uc?export=download&id={file_id}"
-    session = requests.Session()
-
-    # First request
+    url      = f"https://drive.google.com/uc?export=download&id={file_id}"
+    session  = requests.Session()
     response = session.get(url, stream=True)
 
-    # Handle Google's virus scan warning for large files
     token = None
     for key, value in response.cookies.items():
         if key.startswith('download_warning'):
@@ -58,87 +61,84 @@ def download_from_drive(file_id, dest_path):
             break
 
     if token:
-        response = session.get(
-            url,
-            params ={'confirm': token},
-            stream  = True
-        )
+        response = session.get(url, params={'confirm': token}, stream=True)
 
-    # Write file
     with open(dest_path, 'wb') as f:
         for chunk in response.iter_content(chunk_size=32768):
             if chunk:
                 f.write(chunk)
 
     size_kb = os.path.getsize(dest_path) / 1024
-    print(f"{os.path.basename(dest_path)} downloaded! ({size_kb:.1f} KB)")
+    print(f"  {os.path.basename(dest_path)} downloaded! ({size_kb:.1f} KB)")
 
 
 def ensure_files():
     """Download any missing model files from Google Drive"""
     all_ok = True
     for filename, file_id in DRIVE_FILES.items():
-
-        # Determine destination folder
         dest = os.path.join(
             RESULTS_DIR if filename.endswith('.csv') else MODEL_DIR,
             filename
         )
-
         if os.path.exists(dest):
-            print(f"{filename} already exists")
+            print(f"  {filename} already exists")
         else:
             if not file_id:
-                print(f"ERROR: No Drive ID set for {filename}")
-                print(f"     Set environment variable for this file")
+                print(f"  ERROR: No Drive ID set for {filename}")
                 all_ok = False
                 continue
             try:
-                print(f"{filename} missing — downloading...")
                 download_from_drive(file_id, dest)
             except Exception as e:
-                print(f"Failed to download {filename}: {e}")
+                print(f"  Failed to download {filename}: {e}")
                 all_ok = False
-
     return all_ok
 
 
 def initialize():
-    """Load model files — called once on server startup"""
-    global model, scaler, FEATURE_COLS, explainer
+    """Load all model files — called once on server startup"""
+    global model, scaler, FEATURE_COLS, explainer, rf_model, rf_explainer
 
-    print("\n" + "="*50)
+    print("\n" + "="*55)
     print("  CSE VOLATILITY PREDICTOR — STARTUP")
-    print("="*50)
+    print("="*55)
 
-    #  Check/download files from Google Drive
-    print("\n Step 1: Checking model files...")
-    ok = ensure_files()
-    if not ok:
-        print("Some files missing — check environment variables!")
+    print("\nStep 1: Checking model files...")
+    ensure_files()
 
-    #  Load model into memory
-    print("\n Step 2: Loading model into memory...")
+    print("\nStep 2: Loading models into memory...")
+
+    # ── Gradient Boosting ──
     try:
         model        = joblib.load(os.path.join(MODEL_DIR, "gradient_boosting_model.pkl"))
         scaler       = joblib.load(os.path.join(MODEL_DIR, "scaler.pkl"))
         FEATURE_COLS = joblib.load(os.path.join(MODEL_DIR, "feature_cols.pkl"))
         explainer    = shap.TreeExplainer(model)
-
-        print(f"   GradientBoostingClassifier loaded")
-        print(f"   StandardScaler loaded")
-        print(f"   Feature columns loaded: {len(FEATURE_COLS)} features")
-        print(f"   SHAP TreeExplainer ready")
-        print(f"\n Server ready! All systems operational.")
-        print("="*50 + "\n")
-
+        print(f"  GradientBoostingClassifier loaded | Features: {len(FEATURE_COLS)}")
+        print(f"  StandardScaler loaded")
+        print(f"  SHAP TreeExplainer (GB) ready")
     except Exception as e:
-        print(f"  Failed to load model: {e}")
+        print(f"  Failed to load GradientBoosting: {e}")
         raise e
 
+    # ── Random Forest ──
+    try:
+        rf_path = os.path.join(MODEL_DIR, "random_forest_model.pkl")
+        if os.path.exists(rf_path):
+            rf_model     = joblib.load(rf_path)
+            rf_explainer = shap.TreeExplainer(rf_model)
+            print(f"  RandomForestClassifier loaded")
+            print(f"  SHAP TreeExplainer (RF) ready")
+        else:
+            print(f"  WARNING: Random Forest model not found — RF endpoints will be unavailable")
+    except Exception as e:
+        print(f"  WARNING: Failed to load RandomForest: {e}")
+
+    print(f"\nServer ready! All systems operational.")
+    print("="*55 + "\n")
 
 
-# TECHNICAL INDICATOR FUNCTIONS
+# ── TECHNICAL INDICATOR FUNCTIONS ─────────────────────────────────────────────
 
 def compute_rsi(series, period=14):
     delta    = series.diff()
@@ -191,12 +191,10 @@ def build_features(hist_df):
     volume = df['Volume']
     open_  = df['Open']
 
-    # Moving Averages
     for w in [5, 10, 20, 50]:
         df[f'MA_{w}']  = close.rolling(w).mean()
         df[f'EMA_{w}'] = close.ewm(span=w, adjust=False).mean()
 
-    # Price Features
     df['Daily_Return']     = close.pct_change()
     df['HL_Pct']           = (high - low) / (close + 1e-9)
     df['OC_Pct']           = (close - open_) / (open_ + 1e-9)
@@ -206,89 +204,222 @@ def build_features(hist_df):
     df['MA5_MA20_Cross']   = df['MA_5']  - df['MA_20']
     df['MA10_MA50_Cross']  = df['MA_10'] - df['MA_50']
 
-    # RSI
     df['RSI_7']  = compute_rsi(close, 7)
     df['RSI_14'] = compute_rsi(close, 14)
     df['RSI_21'] = compute_rsi(close, 21)
 
-    # Momentum & ROC
     for p in [3, 5, 10, 20]:
         df[f'ROC_{p}']      = close.pct_change(p) * 100
         df[f'Momentum_{p}'] = close - close.shift(p)
 
-    # MACD
     macd, sig, hist   = compute_macd(close)
     df['MACD']        = macd
     df['MACD_Signal'] = sig
     df['MACD_Hist']   = hist
 
-    # Bollinger Bands
-    bb_u, bb_l, bb_bw  = compute_bollinger(close, 20)
-    df['BB_Upper']      = bb_u
-    df['BB_Lower']      = bb_l
-    df['BB_Bandwidth']  = bb_bw
-    df['BB_Position']   = (close - bb_l) / ((bb_u - bb_l) + 1e-9)
+    bb_u, bb_l, bb_bw = compute_bollinger(close, 20)
+    df['BB_Upper']     = bb_u
+    df['BB_Lower']     = bb_l
+    df['BB_Bandwidth'] = bb_bw
+    df['BB_Position']  = (close - bb_l) / ((bb_u - bb_l) + 1e-9)
 
-    # Volatility
     df['Volatility_5']  = close.pct_change().rolling(5).std()
     df['Volatility_10'] = close.pct_change().rolling(10).std()
     df['Volatility_20'] = close.pct_change().rolling(20).std()
     df['ATR_14']        = compute_atr(high, low, close, 14)
     df['ATR_Ratio']     = df['ATR_14'] / (close + 1e-9)
 
-    # Volume
     df['Volume_MA5']   = volume.rolling(5).mean()
     df['Volume_MA10']  = volume.rolling(10).mean()
     df['Volume_Ratio'] = volume / (df['Volume_MA5'] + 1e-9)
     df['OBV']          = compute_obv(close, volume)
 
-    # Lag Features
     for lag in [1, 2, 3, 5]:
         df[f'Return_Lag_{lag}'] = close.pct_change().shift(lag)
         df[f'Close_Lag_{lag}']  = close.shift(lag)
 
-    # Raw OHLCV
     df['Open']   = open_
     df['High']   = high
     df['Low']    = low
     df['Close']  = close
     df['Volume'] = volume
 
-    # Return last row (most recent data point)
     return df[FEATURE_COLS].iloc[-1]
 
 
+def fetch_stock_data(ticker):
+    """Shared function to fetch and clean Yahoo Finance data"""
+    df = yf.download(ticker, period='120d', interval='1d',
+                     progress=False, auto_adjust=True)
 
-# API ENDPOINTS
+    if df is None or len(df) < 60:
+        return None, f"Not enough data for {ticker}. Got {len(df) if df is not None else 0} rows."
 
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+
+    df.reset_index(inplace=True)
+    df = df[['Date', 'Open', 'High', 'Low', 'Close', 'Volume']].copy()
+    for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
+        df[col] = pd.to_numeric(df[col], errors='coerce')
+    df.dropna(inplace=True)
+    df.sort_values('Date', inplace=True)
+    df.reset_index(drop=True, inplace=True)
+    return df, None
+
+
+def run_shap(shap_explainer, X, mdl):
+    """Compute SHAP values — handles both GB and RF output shapes"""
+    sv = shap_explainer.shap_values(X)
+    # RF returns list of arrays (one per class); use class-1 (HIGH) values
+    if isinstance(sv, list):
+        sv_flat = sv[1][0]
+    else:
+        arr = np.array(sv)
+        sv_flat = arr[0] if arr.ndim > 1 else arr
+    return sv_flat
+
+
+def build_shap_list(sv_flat, feature_importances):
+    """Build sorted SHAP feature list"""
+    return sorted([
+        {
+            'feature'   : feat,
+            'shap_value': round(float(sv_flat[i]), 5),
+            'importance': round(float(feature_importances[i]), 5)
+        }
+        for i, feat in enumerate(FEATURE_COLS)
+    ], key=lambda x: abs(x['shap_value']), reverse=True)
+
+
+# Median values for all 56 features (from CSE training dataset)
+FEATURE_MEDIANS = {
+    'MA_5': 66.0, 'MA_10': 66.0, 'MA_20': 66.0, 'MA_50': 66.0,
+    'EMA_5': 66.0, 'EMA_10': 66.0, 'EMA_20': 66.0, 'EMA_50': 66.0,
+    'Daily_Return': 0.0, 'HL_Pct': 0.02, 'OC_Pct': 0.0,
+    'Price_MA5_Ratio': 1.0, 'Price_MA20_Ratio': 1.0, 'Price_MA50_Ratio': 1.0,
+    'MA5_MA20_Cross': 0.0, 'MA10_MA50_Cross': 0.0,
+    'RSI_7': 50.0, 'RSI_14': 50.0, 'RSI_21': 50.0,
+    'ROC_3': 0.0, 'ROC_5': 0.0, 'ROC_10': 0.0, 'ROC_20': 0.0,
+    'Momentum_3': 0.0, 'Momentum_5': 0.0, 'Momentum_10': 0.0, 'Momentum_20': 0.0,
+    'MACD': 0.0, 'MACD_Signal': 0.0, 'MACD_Hist': 0.0,
+    'BB_Upper': 70.0, 'BB_Lower': 62.0, 'BB_Bandwidth': 0.08, 'BB_Position': 0.5,
+    'Volatility_5': 0.012, 'Volatility_10': 0.015, 'Volatility_20': 0.016,
+    'ATR_14': 1.3, 'ATR_Ratio': 0.02,
+    'Volume_MA5': 280000.0, 'Volume_MA10': 280000.0,
+    'Volume_Ratio': 1.0, 'OBV': 0.0,
+    'Return_Lag_1': 0.0, 'Return_Lag_2': 0.0,
+    'Return_Lag_3': 0.0, 'Return_Lag_5': 0.0,
+    'Close_Lag_1': 66.0, 'Close_Lag_2': 66.0,
+    'Close_Lag_3': 66.0, 'Close_Lag_5': 66.0,
+    'Open': 66.0, 'High': 67.5, 'Low': 64.5,
+    'Close': 66.0, 'Volume': 280000.0,
+}
+
+
+def build_manual_feature_row(user_inputs):
+    """Build full 56-feature vector from user inputs + dataset medians"""
+    return [
+        float(user_inputs[feat]) if feat in user_inputs
+        else FEATURE_MEDIANS.get(feat, 0.0)
+        for feat in FEATURE_COLS
+    ]
+
+
+def make_prediction_response(mdl, shap_expl, X, ticker, df, interpretation_fn):
+    """Shared prediction + SHAP response builder for live endpoints"""
+    pred          = int(mdl.predict(X)[0])
+    probabilities = mdl.predict_proba(X)[0]
+    confidence    = float(probabilities[pred]) * 100
+
+    sv_flat   = run_shap(shap_expl, X, mdl)
+    shap_list = build_shap_list(sv_flat, mdl.feature_importances_)
+
+    recent = df.tail(30)
+    price_history = [
+        {
+            'date'  : str(row['Date'].date()),
+            'close' : round(float(row['Close']), 2),
+            'high'  : round(float(row['High']),  2),
+            'low'   : round(float(row['Low']),   2),
+            'volume': int(row['Volume'])
+        }
+        for _, row in recent.iterrows()
+    ]
+    latest = df.iloc[-1]
+
+    return {
+        'ticker'        : ticker,
+        'latest_date'   : str(latest['Date'].date()),
+        'latest_close'  : round(float(latest['Close']),  2),
+        'latest_open'   : round(float(latest['Open']),   2),
+        'latest_high'   : round(float(latest['High']),   2),
+        'latest_low'    : round(float(latest['Low']),    2),
+        'latest_volume' : int(latest['Volume']),
+        'data_rows'     : len(df),
+        'prediction'    : pred,
+        'volatility'    : 'HIGH' if pred == 1 else 'LOW',
+        'confidence'    : round(confidence, 2),
+        'probabilities' : {
+            'LOW' : round(float(probabilities[0]) * 100, 2),
+            'HIGH': round(float(probabilities[1]) * 100, 2),
+        },
+        'top_features'  : shap_list[:10],
+        'price_history' : price_history,
+        'interpretation': interpretation_fn(pred),
+    }
+
+
+def make_manual_response(mdl, shap_expl, X, user_inputs):
+    """Shared prediction + SHAP response builder for manual endpoints"""
+    pred          = int(mdl.predict(X)[0])
+    probabilities = mdl.predict_proba(X)[0]
+    confidence    = float(probabilities[pred]) * 100
+
+    sv_flat   = run_shap(shap_expl, X, mdl)
+    shap_list = build_shap_list(sv_flat, mdl.feature_importances_)
+
+    return {
+        'prediction'    : pred,
+        'volatility'    : 'HIGH' if pred == 1 else 'LOW',
+        'confidence'    : round(confidence, 2),
+        'probabilities' : {
+            'LOW' : round(float(probabilities[0]) * 100, 2),
+            'HIGH': round(float(probabilities[1]) * 100, 2),
+        },
+        'top_features'  : shap_list[:10],
+        'interpretation': (
+            'High volatility expected based on your inputs. Indicators suggest significant price fluctuations.'
+            if pred == 1 else
+            'Low volatility expected based on your inputs. Indicators suggest relatively stable prices.'
+        ),
+        'inputs_used'   : user_inputs,
+    }
+
+
+# ── API ENDPOINTS ─────────────────────────────────────────────────────────────
 
 @app.route('/health', methods=['GET'])
 def health():
-    """Health check — confirms server and model are running"""
     return jsonify({
-        'status'         : 'ok',
-        'model'          : 'GradientBoostingClassifier',
-        'problem'        : 'CSE Stock Volatility Prediction',
-        'features'       : len(FEATURE_COLS) if FEATURE_COLS else 0,
-        'model_loaded'   : model is not None,
-        'scaler_loaded'  : scaler is not None,
-        'explainer_ready': explainer is not None
+        'status'       : 'ok',
+        'gb_loaded'    : model       is not None,
+        'rf_loaded'    : rf_model    is not None,
+        'scaler_loaded': scaler      is not None,
+        'features'     : len(FEATURE_COLS) if FEATURE_COLS else 0,
+        'gb_explainer' : explainer    is not None,
+        'rf_explainer' : rf_explainer is not None,
     })
 
 
+# ── GRADIENT BOOSTING ─────────────────────────────────────────────────────────
+
 @app.route('/metrics', methods=['GET'])
 def get_metrics():
-    """
-    Returns real model metrics from CSV files saved during training.
-    No hardcoded values — everything comes from actual training results.
-    """
     try:
-        metrics_df = pd.read_csv(
-            os.path.join(RESULTS_DIR, 'model_metrics.csv'))
-        feats_df   = pd.read_csv(
-            os.path.join(RESULTS_DIR, 'feature_importances.csv')).head(10)
+        metrics_df = pd.read_csv(os.path.join(RESULTS_DIR, 'model_metrics.csv'))
+        feats_df   = pd.read_csv(os.path.join(RESULTS_DIR, 'feature_importances.csv')).head(10)
 
-        # Build metrics dict from CSV
         metrics = {}
         for _, row in metrics_df.iterrows():
             metrics[row['Metric']] = {
@@ -296,16 +427,11 @@ def get_metrics():
                 'test'      : round(float(row['Test']),       4)
             }
 
-        # Build feature importance list from CSV
         features = [
-            {
-                'feature'   : row['Feature'],
-                'importance': round(float(row['Importance']), 4)
-            }
+            {'feature': row['Feature'], 'importance': round(float(row['Importance']), 4)}
             for _, row in feats_df.iterrows()
         ]
 
-        # Get actual hyperparameters from trained model
         params = model.get_params()
         best_params = {
             'n_estimators'    : params.get('n_estimators'),
@@ -323,238 +449,138 @@ def get_metrics():
             'n_features'         : len(FEATURE_COLS),
             'n_estimators_actual': len(model.estimators_)
         })
-
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
 
 @app.route('/predict/<ticker>', methods=['GET'])
 def predict_ticker(ticker):
-    """
-    Main prediction endpoint.
-    1. Fetches live data from Yahoo Finance
-    2. Computes 56 technical indicators
-    3. Scales using saved StandardScaler
-    4. Predicts HIGH/LOW volatility using trained model
-    5. Computes SHAP values for explainability
-    6. Returns full result including price history
-    """
     try:
-        print(f"\n Prediction request: {ticker}")
+        print(f"\nGB Prediction: {ticker}")
+        df, err = fetch_stock_data(ticker)
+        if err:
+            return jsonify({'error': err}), 400
 
-        # Fetch live stock data 
-        print(f"  Fetching live data from Yahoo Finance...")
-        df = yf.download(
-            ticker,
-            period      = '120d',
-            interval    = '1d',
-            progress    = False,
-            auto_adjust = True
-        )
-
-        if df is None or len(df) < 60:
-            return jsonify({
-                'error': f'Not enough data for {ticker}. Got {len(df) if df is not None else 0} rows. Need at least 60.'
-            }), 400
-
-        # Flatten multi-level columns (yfinance sometimes returns these)
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-
-        df.reset_index(inplace=True)
-        df = df[['Date', 'Open', 'High', 'Low', 'Close', 'Volume']].copy()
-
-        for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
-            df[col] = pd.to_numeric(df[col], errors='coerce')
-
-        df.dropna(inplace=True)
-        df.sort_values('Date', inplace=True)
-        df.reset_index(drop=True, inplace=True)
-
-        print(f"  Got {len(df)} rows | Latest: {df['Date'].iloc[-1].date()} | Close: {df['Close'].iloc[-1]:.2f} LKR")
-
-        # Build features 
-        print(f" Computing 56 technical indicators...")
         features_row = build_features(df)
-
         if features_row.isnull().any():
             null_feats = features_row[features_row.isnull()].index.tolist()
-            return jsonify({
-                'error': f'NaN found in features: {null_feats[:5]}. Try a different ticker.'
-            }), 400
+            return jsonify({'error': f'NaN in features: {null_feats[:5]}'}), 400
 
-        # Scale features 
         X = scaler.transform([features_row.values])
 
-        # Predict
-        pred          = int(model.predict(X)[0])
-        probabilities = model.predict_proba(X)[0]
-        confidence    = float(probabilities[pred]) * 100
-
-        print(f" Prediction: {'HIGH' if pred==1 else 'LOW'} volatility ({confidence:.1f}% confidence)")
-
-        #  SHAP Explainability 
-        print(f" Computing SHAP values...")
-        sv      = explainer.shap_values(X)
-        sv_flat = sv[0] if len(np.array(sv).shape) > 1 else sv
-
-        shap_list = sorted([
-            {
-                'feature'   : feat,
-                'shap_value': round(float(sv_flat[i]), 5),
-                'importance': round(float(model.feature_importances_[i]), 5)
-            }
-            for i, feat in enumerate(FEATURE_COLS)
-        ], key=lambda x: abs(x['shap_value']), reverse=True)
-
-        # Build price history for chart
-        recent = df.tail(30)
-        price_history = [
-            {
-                'date'  : str(row['Date'].date()),
-                'close' : round(float(row['Close']), 2),
-                'high'  : round(float(row['High']),  2),
-                'low'   : round(float(row['Low']),   2),
-                'volume': int(row['Volume'])
-            }
-            for _, row in recent.iterrows()
-        ]
-
-        latest = df.iloc[-1]
-
-        return jsonify({
-            # Stock info
-            'ticker'        : ticker,
-            'latest_date'   : str(latest['Date'].date()),
-            'latest_close'  : round(float(latest['Close']),  2),
-            'latest_open'   : round(float(latest['Open']),   2),
-            'latest_high'   : round(float(latest['High']),   2),
-            'latest_low'    : round(float(latest['Low']),    2),
-            'latest_volume' : int(latest['Volume']),
-            'data_rows'     : len(df),
-
-            # Prediction
-            'prediction'    : pred,
-            'volatility'    : 'HIGH' if pred == 1 else 'LOW',
-            'confidence'    : round(confidence, 2),
-            'probabilities' : {
-                'LOW' : round(float(probabilities[0]) * 100, 2),
-                'HIGH': round(float(probabilities[1]) * 100, 2)
-            },
-
-            # Explainability
-            'top_features'  : shap_list[:10],
-
-            # Price chart data
-            'price_history' : price_history,
-
-            # Human readable explanation
-            'interpretation': (
-                'High market volatility expected. Prices may fluctuate significantly in the next 5 trading days. Consider risk management strategies.'
+        return jsonify(make_prediction_response(
+            model, explainer, X, ticker, df,
+            lambda pred: (
+                'High market volatility expected. Prices may fluctuate significantly in the next 5 trading days.'
                 if pred == 1 else
                 'Low market volatility expected. Prices likely to remain relatively stable in the next 5 trading days.'
             )
-        })
-
+        ))
     except Exception as e:
-        import traceback
-        print(f" Error: {e}")
-        print(traceback.format_exc())
+        import traceback; print(traceback.format_exc())
         return jsonify({'error': str(e)}), 500
+
 
 @app.route('/predict_manual', methods=['POST'])
 def predict_manual():
-    """
-    Manual prediction endpoint.
-    Accepts 8 key technical indicator values from user,
-    fills remaining 48 features with dataset medians,
-    then predicts using the trained model.
-    """
     try:
-        body        = request.get_json()
-        user_inputs = body.get('features', {})
-
-        print(f"\n✏️  Manual prediction request: {user_inputs}")
-
-        # Median values for all 56 features
-        # These are approximate medians from the CSE training dataset
-        FEATURE_MEDIANS = {
-            'MA_5': 66.0, 'MA_10': 66.0, 'MA_20': 66.0, 'MA_50': 66.0,
-            'EMA_5': 66.0, 'EMA_10': 66.0, 'EMA_20': 66.0, 'EMA_50': 66.0,
-            'Daily_Return': 0.0, 'HL_Pct': 0.02, 'OC_Pct': 0.0,
-            'Price_MA5_Ratio': 1.0, 'Price_MA20_Ratio': 1.0, 'Price_MA50_Ratio': 1.0,
-            'MA5_MA20_Cross': 0.0, 'MA10_MA50_Cross': 0.0,
-            'RSI_7': 50.0, 'RSI_14': 50.0, 'RSI_21': 50.0,
-            'ROC_3': 0.0, 'ROC_5': 0.0, 'ROC_10': 0.0, 'ROC_20': 0.0,
-            'Momentum_3': 0.0, 'Momentum_5': 0.0, 'Momentum_10': 0.0, 'Momentum_20': 0.0,
-            'MACD': 0.0, 'MACD_Signal': 0.0, 'MACD_Hist': 0.0,
-            'BB_Upper': 70.0, 'BB_Lower': 62.0, 'BB_Bandwidth': 0.08, 'BB_Position': 0.5,
-            'Volatility_5': 0.012, 'Volatility_10': 0.015, 'Volatility_20': 0.016,
-            'ATR_14': 1.3, 'ATR_Ratio': 0.02,
-            'Volume_MA5': 280000.0, 'Volume_MA10': 280000.0,
-            'Volume_Ratio': 1.0, 'OBV': 0.0,
-            'Return_Lag_1': 0.0, 'Return_Lag_2': 0.0,
-            'Return_Lag_3': 0.0, 'Return_Lag_5': 0.0,
-            'Close_Lag_1': 66.0, 'Close_Lag_2': 66.0,
-            'Close_Lag_3': 66.0, 'Close_Lag_5': 66.0,
-            'Open': 66.0, 'High': 67.5, 'Low': 64.5,
-            'Close': 66.0, 'Volume': 280000.0,
-        }
-
-        # Build feature vector: start from medians, override with user inputs
-        feature_row = []
-        for feat in FEATURE_COLS:
-            if feat in user_inputs:
-                feature_row.append(float(user_inputs[feat]))
-            else:
-                feature_row.append(FEATURE_MEDIANS.get(feat, 0.0))
-
-        # Scale and predict
-        X             = scaler.transform([feature_row])
-        pred          = int(model.predict(X)[0])
-        probabilities = model.predict_proba(X)[0]
-        confidence    = float(probabilities[pred]) * 100
-
-        # SHAP
-        sv      = explainer.shap_values(X)
-        sv_flat = sv[0] if len(np.array(sv).shape) > 1 else sv
-
-        shap_list = sorted([
-            {
-                'feature'   : feat,
-                'shap_value': round(float(sv_flat[i]), 5),
-                'importance': round(float(model.feature_importances_[i]), 5)
-            }
-            for i, feat in enumerate(FEATURE_COLS)
-        ], key=lambda x: abs(x['shap_value']), reverse=True)
-
-        print(f"  🎯 Manual result: {'HIGH' if pred==1 else 'LOW'} ({confidence:.1f}%)")
-
-        return jsonify({
-            'prediction'    : pred,
-            'volatility'    : 'HIGH' if pred == 1 else 'LOW',
-            'confidence'    : round(confidence, 2),
-            'probabilities' : {
-                'LOW' : round(float(probabilities[0]) * 100, 2),
-                'HIGH': round(float(probabilities[1]) * 100, 2)
-            },
-            'top_features'  : shap_list[:10],
-            'interpretation': (
-                'High market volatility expected based on your input values. '
-                'The indicators you set suggest significant price fluctuations ahead.'
-                if pred == 1 else
-                'Low market volatility expected based on your input values. '
-                'The indicators you set suggest relatively stable prices ahead.'
-            ),
-            'inputs_used'   : user_inputs
-        })
-
+        user_inputs = request.get_json().get('features', {})
+        print(f"\nGB Manual prediction")
+        feature_row = build_manual_feature_row(user_inputs)
+        X           = scaler.transform([feature_row])
+        return jsonify(make_manual_response(model, explainer, X, user_inputs))
     except Exception as e:
-        import traceback
-        print(traceback.format_exc())
+        import traceback; print(traceback.format_exc())
         return jsonify({'error': str(e)}), 500
 
-# STARTUP — Initialize model when server starts
+
+# ── RANDOM FOREST ─────────────────────────────────────────────────────────────
+
+@app.route('/rf_metrics', methods=['GET'])
+def get_rf_metrics():
+    if rf_model is None:
+        return jsonify({'error': 'Random Forest model not loaded'}), 503
+    try:
+        metrics_df = pd.read_csv(os.path.join(RESULTS_DIR, 'rf_metrics.csv'))
+        feats_df   = pd.read_csv(os.path.join(RESULTS_DIR, 'rf_feature_importances.csv')).head(10)
+
+        metrics = {}
+        for _, row in metrics_df.iterrows():
+            metrics[row['Metric']] = {
+                'validation': round(float(row['Validation']), 4),
+                'test'      : round(float(row['Test']),       4)
+            }
+
+        features = [
+            {'feature': row['Feature'], 'importance': round(float(row['Importance']), 4)}
+            for _, row in feats_df.iterrows()
+        ]
+
+        params = rf_model.get_params()
+        best_params = {
+            'n_estimators'    : params.get('n_estimators'),
+            'max_depth'       : params.get('max_depth'),
+            'min_samples_leaf': params.get('min_samples_leaf'),
+            'max_features'    : params.get('max_features'),
+            'random_state'    : params.get('random_state'),
+        }
+
+        return jsonify({
+            'metrics'    : metrics,
+            'features'   : features,
+            'best_params': best_params,
+            'n_features' : len(FEATURE_COLS),
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/predict_rf/<ticker>', methods=['GET'])
+def predict_rf(ticker):
+    if rf_model is None:
+        return jsonify({'error': 'Random Forest model not loaded'}), 503
+    try:
+        print(f"\nRF Prediction: {ticker}")
+        df, err = fetch_stock_data(ticker)
+        if err:
+            return jsonify({'error': err}), 400
+
+        features_row = build_features(df)
+        if features_row.isnull().any():
+            null_feats = features_row[features_row.isnull()].index.tolist()
+            return jsonify({'error': f'NaN in features: {null_feats[:5]}'}), 400
+
+        X = scaler.transform([features_row.values])
+
+        return jsonify(make_prediction_response(
+            rf_model, rf_explainer, X, ticker, df,
+            lambda pred: (
+                'Random Forest predicts HIGH volatility. Ensemble of decision trees detected volatile patterns.'
+                if pred == 1 else
+                'Random Forest predicts LOW volatility. Ensemble of decision trees detected stable patterns.'
+            )
+        ))
+    except Exception as e:
+        import traceback; print(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/predict_manual_rf', methods=['POST'])
+def predict_manual_rf():
+    if rf_model is None:
+        return jsonify({'error': 'Random Forest model not loaded'}), 503
+    try:
+        user_inputs = request.get_json().get('features', {})
+        print(f"\nRF Manual prediction")
+        feature_row = build_manual_feature_row(user_inputs)
+        X           = scaler.transform([feature_row])
+        return jsonify(make_manual_response(rf_model, rf_explainer, X, user_inputs))
+    except Exception as e:
+        import traceback; print(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+
+# ── STARTUP ───────────────────────────────────────────────────────────────────
 
 initialize()
 
