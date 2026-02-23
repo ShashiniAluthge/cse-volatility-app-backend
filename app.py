@@ -271,12 +271,14 @@ def fetch_stock_data(ticker):
 def run_shap(shap_explainer, X, mdl):
     """Compute SHAP values — handles both GB and RF output shapes"""
     sv = shap_explainer.shap_values(X)
-    # RF returns list of arrays (one per class); use class-1 (HIGH) values
     if isinstance(sv, list):
-        sv_flat = sv[1][0]
+        # RF: sv is list of 2D arrays [n_samples, n_features] per class
+        # Use class-1 (HIGH volatility) and flatten to 1D
+        sv_flat = np.array(sv[1]).flatten()
     else:
+        # GB: sv is 2D array [n_samples, n_features]
         arr = np.array(sv)
-        sv_flat = arr[0] if arr.ndim > 1 else arr
+        sv_flat = arr.flatten() if arr.ndim > 1 else arr
     return sv_flat
 
 
